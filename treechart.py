@@ -2,6 +2,7 @@ import io
 import re
 import pandas as pd
 import streamlit as st
+from graphviz import Digraph
 
 try:
     import graphviz
@@ -290,11 +291,18 @@ st.download_button("Download .dot source", data=dot_src.encode("utf-8"), file_na
 
 if graphviz is not None:
     try:
-        g = graphviz.Source(dot_src)
-        svg_bytes = g.pipe(format="svg")
-        st.download_button("Download SVG", data=svg_bytes, file_name=f"{commodity}_decision_tree.svg", mime="image/svg+xml")
-        # PNG is larger; still useful
+        # g = graphviz.Source(dot_src)
+        # svg_bytes = g.pipe(format="svg")
+        
+
+        g = Digraph(engine="dot")
+        g.source = dot_src
         png_bytes = g.pipe(format="png")
         st.download_button("Download PNG", data=png_bytes, file_name=f"{commodity}_decision_tree.png", mime="image/png")
+
+        # st.download_button("Download SVG", data=svg_bytes, file_name=f"{commodity}_decision_tree.svg", mime="image/svg+xml")
+        # # PNG is larger; still useful
+        # png_bytes = g.pipe(format="png")
+        # st.download_button("Download PNG", data=png_bytes, file_name=f"{commodity}_decision_tree.png", mime="image/png")
     except Exception as e:
         st.warning("SVG/PNG export requires Graphviz system binaries. If this is a hosted environment without them, the buttons may not work.")
