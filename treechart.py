@@ -44,10 +44,8 @@ def format_node_label(title: str, count: int | None = None, pct: float | None = 
         unit = "Sample" if count == 1 else "Samples"
         return f"{title}\\n[{count} {unit}]"
     return title
-
-
 def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settings: dict) -> tuple[str, dict]:
-    """Build DOT decision tree for a single commodity+variant."""
+    """Build DOT decision tree for a single commodity+variant with grouping by Test Type."""
     cols = {
         "commodity": "Commodity",
         "variant2": "Variant 2",
@@ -57,6 +55,7 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settin
         "overall_labelling": "Overall Labelling Complaince",
         "substandard_cases": "Sub-Standard Cases",
         "unsafe_cases": "Unsafe Cases",
+        "test_type": "Test Type",   # 👈 NEW: mapping for grouping
     }
 
     dfx = df[df[cols["commodity"]] == commodity].copy()
@@ -78,22 +77,34 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settin
     n_safety_unsafe = (saf_series == UNSAFE_TOKEN).sum()
     n_lab_mis = lab_series.apply(lambda s: any(x in s for x in MIS_LABELLED_SET)).sum()
 
-    # parameters
-    qual_params = []
+    # -----------------------------
+    # Parameters grouped by Test Type
+    # -----------------------------
+    from collections import defaultdict
+
+    qual_grouped = defaultdict(list)
     if n_quality_sub:
         for _, row in dfx[qual_series == SUBSTANDARD_TOKEN].iterrows():
-            qual_params.extend(split_parameters(row.get(cols["substandard_cases"])))
-    saf_params = []
+            ttype = str(row.get(cols["test_type"], "Other")).strip()
+            for p in split_parameters(row.get(cols["substandard_cases"])):
+                if p.strip():
+                    qual_grouped[ttype].append(p.strip())
+
+    saf_grouped = defaultdict(list)
     if n_safety_unsafe:
         for _, row in dfx[saf_series == UNSAFE_TOKEN].iterrows():
-            saf_params.extend(split_parameters(row.get(cols["unsafe_cases"])))
-    qual_param_counts = Counter([p.strip() for p in qual_params if p.strip()])
-    saf_param_counts = Counter([p.strip() for p in saf_params if p.strip()])
+            ttype = str(row.get(cols["test_type"], "Other")).strip()
+            for p in split_parameters(row.get(cols["unsafe_cases"])):
+                if p.strip():
+                    saf_grouped[ttype].append(p.strip())
 
+    # helper
     def pct(n: int) -> float:
         return (n / n_total * 100.0) if n_total else 0.0
 
-    # styles
+    # -----------------------------
+    # Styles
+    # -----------------------------
     rankdir = settings["rankdir"]
     fontname = settings["fontname"]
     fontsize = settings["fontsize"]
@@ -114,31 +125,146 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settin
         f"  edge [fontname=\"{fontname}\", fontsize={max(8, fontsize-2)} , arrowhead=normal];",
     ]
 
-    # main nodes
+    # -----------------------------
+    # Main Nodes
+    # -----------------------------
     root_label = format_node_label(f"{commodity} - {variant_choice}", n_total, 100.0)
     comp_label = format_node_label("Compliant", n_compliant, pct(n_compliant))
     noncomp_label = format_node_label("Non-Compliant", n_noncompliant, pct(n_noncompliant))
+
     dot_lines.append(f'  root [label="{root_label}"];')
     dot_lines.append(f'  comp [label="{comp_label}", fillcolor="{compliant_color}"];')
     dot_lines.append(f'  noncomp [label="{noncomp_label}", fillcolor="{noncompliant_color}"];')
     dot_lines.append("  root -> comp; root -> noncomp;")
 
-    # quality/safety/lab
+    # Quality / Safety / Lab
     dot_lines.append(f'  qual [label="{format_node_label("Quality Parameters", n_quality_sub, pct(n_quality_sub))}"];')
     dot_lines.append(f'  saf [label="{format_node_label("Safety Parameters", n_safety_unsafe, pct(n_safety_unsafe))}"];')
     dot_lines.append(f'  lab [label="{format_node_label("Labelling Parameters", n_lab_mis, pct(n_lab_mis))}"];')
     dot_lines.append("  noncomp -> qual; noncomp -> saf; noncomp -> lab;")
 
-    # leaf params
-    for i, (pname, cnt) in enumerate(sorted(qual_param_counts.items(), key=lambda x: -x[1])):
-        dot_lines.append(f'  q{i} [label="{format_node_label(pname, cnt)}"];')
-        dot_lines.append(f"  qual -> q{i};")
-    for i, (pname, cnt) in enumerate(sorted(saf_param_counts.items(), key=lambda x: -x[1])):
-        dot_lines.append(f'  s{i} [label="{format_node_label(pname, cnt)}"];')
-        dot_lines.append(f"  saf -> s{i};")
+    # -----------------------------
+    # Quality Branch with grouping
+    # -----------------------------
+    for j, (ttype, plist) in enumerate(qual_grouped.items()):
+        type_id = f"qtype{j}"
+        dot_lines.append(f'  {type_id} [label="{format_node_label(ttype, len(plist))}"];')
+        dot_lines.append(f"  qual -> {type_id};")
+        for i, pname in enumerate(sorted(set(plist))):  # unique params
+            pid = f"{type_id}_{i}"
+            dot_lines.append(f'  {pid} [label="{format_node_label(pname, plist.count(pname))}"];')
+            dot_lines.append(f"  {type_id} -> {pid};")
+
+    # -----------------------------
+    # Safety Branch with grouping
+    # -----------------------------
+    for j, (ttype, plist) in enumerate(saf_grouped.items()):
+        type_id = f"stype{j}"
+        dot_lines.append(f'  {type_id} [label="{format_node_label(ttype, len(plist))}"];')
+        dot_lines.append(f"  saf -> {type_id};")
+        for i, pname in enumerate(sorted(set(plist))):
+            pid = f"{type_id}_{i}"
+            dot_lines.append(f'  {pid} [label="{format_node_label(pname, plist.count(pname))}"];')
+            dot_lines.append(f"  {type_id} -> {pid};")
 
     dot_lines.append("}")
     return "\n".join(dot_lines), {"total": n_total}
+
+
+
+# def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settings: dict) -> tuple[str, dict]:
+#     """Build DOT decision tree for a single commodity+variant."""
+#     cols = {
+#         "commodity": "Commodity",
+#         "variant2": "Variant 2",
+#         "overall_compliance": "Overall Compliance",
+#         "overall_quality": "Overall Quality Classification",
+#         "overall_safety": "Overall Safety Classification",
+#         "overall_labelling": "Overall Labelling Complaince",
+#         "substandard_cases": "Sub-Standard Cases",
+#         "unsafe_cases": "Unsafe Cases",
+#     }
+
+#     dfx = df[df[cols["commodity"]] == commodity].copy()
+#     dfx = dfx[dfx[cols["variant2"]].fillna("(missing)") == variant_choice]
+#     n_total = len(dfx)
+#     if n_total == 0:
+#         raise ValueError(f"No rows for {commodity} / {variant_choice}")
+
+#     # classifications
+#     comp_series = dfx[cols["overall_compliance"]].astype(str).str.strip().str.lower()
+#     n_compliant = (comp_series == COMPLIANT_TOKEN).sum()
+#     n_noncompliant = n_total - n_compliant
+
+#     qual_series = dfx[cols["overall_quality"]].astype(str).str.strip().str.lower()
+#     saf_series = dfx[cols["overall_safety"]].astype(str).str.strip().str.lower()
+#     lab_series = dfx[cols["overall_labelling"]].astype(str).str.strip().str.lower()
+
+#     n_quality_sub = (qual_series == SUBSTANDARD_TOKEN).sum()
+#     n_safety_unsafe = (saf_series == UNSAFE_TOKEN).sum()
+#     n_lab_mis = lab_series.apply(lambda s: any(x in s for x in MIS_LABELLED_SET)).sum()
+
+#     # parameters
+#     qual_params = []
+#     if n_quality_sub:
+#         for _, row in dfx[qual_series == SUBSTANDARD_TOKEN].iterrows():
+#             qual_params.extend(split_parameters(row.get(cols["substandard_cases"])))
+#     saf_params = []
+#     if n_safety_unsafe:
+#         for _, row in dfx[saf_series == UNSAFE_TOKEN].iterrows():
+#             saf_params.extend(split_parameters(row.get(cols["unsafe_cases"])))
+#     qual_param_counts = Counter([p.strip() for p in qual_params if p.strip()])
+#     saf_param_counts = Counter([p.strip() for p in saf_params if p.strip()])
+
+#     def pct(n: int) -> float:
+#         return (n / n_total * 100.0) if n_total else 0.0
+
+#     # styles
+#     rankdir = settings["rankdir"]
+#     fontname = settings["fontname"]
+#     fontsize = settings["fontsize"]
+#     node_shape = settings["node_shape"]
+#     nodesep = settings["nodesep"]
+#     ranksep = settings["ranksep"]
+#     default_color = settings["default_color"]
+#     compliant_color = settings["compliant_color"]
+#     noncompliant_color = settings["noncompliant_color"]
+
+#     dot_lines = [
+#         "digraph G {",
+#         f"  rankdir={rankdir};",
+#         f"  graph [splines=ortho, nodesep={nodesep}, ranksep={ranksep}];",
+#         ("  node [shape={shape}, style=\"rounded,filled\", color=\"#d0d0d0\", "
+#          "fillcolor=\"{fill}\", fontname=\"{font}\", fontsize={fs}];").format(
+#             shape=node_shape, fill=default_color, font=fontname, fs=fontsize),
+#         f"  edge [fontname=\"{fontname}\", fontsize={max(8, fontsize-2)} , arrowhead=normal];",
+#     ]
+
+#     # main nodes
+#     root_label = format_node_label(f"{commodity} - {variant_choice}", n_total, 100.0)
+#     comp_label = format_node_label("Compliant", n_compliant, pct(n_compliant))
+#     noncomp_label = format_node_label("Non-Compliant", n_noncompliant, pct(n_noncompliant))
+#     dot_lines.append(f'  root [label="{root_label}"];')
+#     dot_lines.append(f'  comp [label="{comp_label}", fillcolor="{compliant_color}"];')
+#     dot_lines.append(f'  noncomp [label="{noncomp_label}", fillcolor="{noncompliant_color}"];')
+#     dot_lines.append("  root -> comp; root -> noncomp;")
+
+#     # quality/safety/lab
+#     dot_lines.append(f'  qual [label="{format_node_label("Quality Parameters", n_quality_sub, pct(n_quality_sub))}"];')
+#     dot_lines.append(f'  saf [label="{format_node_label("Safety Parameters", n_safety_unsafe, pct(n_safety_unsafe))}"];')
+#     dot_lines.append(f'  lab [label="{format_node_label("Labelling Parameters", n_lab_mis, pct(n_lab_mis))}"];')
+#     dot_lines.append("  noncomp -> qual; noncomp -> saf; noncomp -> lab;")
+
+#     # leaf params
+#     for i, (pname, cnt) in enumerate(sorted(qual_param_counts.items(), key=lambda x: -x[1])):
+#         dot_lines.append(f'  q{i} [label="{format_node_label(pname, cnt)}"];')
+#         dot_lines.append(f"  qual -> q{i};")
+#     for i, (pname, cnt) in enumerate(sorted(saf_param_counts.items(), key=lambda x: -x[1])):
+#         dot_lines.append(f'  s{i} [label="{format_node_label(pname, cnt)}"];')
+#         dot_lines.append(f"  saf -> s{i};")
+
+#     dot_lines.append("}")
+#     return "\n".join(dot_lines), {"total": n_total}
 
 
 def build_summary_dot(df: pd.DataFrame, commodity: str, settings: dict) -> str:
