@@ -115,15 +115,27 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settin
     compliant_color = settings["compliant_color"]
     noncompliant_color = settings["noncompliant_color"]
 
+    # dot_lines = [
+    #     "digraph G {",
+    #     f"  rankdir={rankdir};",
+    #     f"  graph [splines=ortho, nodesep={nodesep}, ranksep={ranksep}];",
+    #     ("  node [shape={shape}, style=\"rounded,filled\", color=\"#d0d0d0\", "
+    #      "fillcolor=\"{fill}\", fontname=\"{font}\", fontsize={fs}];").format(
+    #         shape=node_shape, fill=default_color, font=fontname, fs=fontsize),
+    #     f"  edge [fontname=\"{fontname}\", fontsize={max(8, fontsize-2)} , arrowhead=normal];",
+    # ]
+
     dot_lines = [
+        
         "digraph G {",
-        f"  rankdir={rankdir};",
+        "  rankdir=TB;",   # 👈 force top-to-bottom flow
         f"  graph [splines=ortho, nodesep={nodesep}, ranksep={ranksep}];",
         ("  node [shape={shape}, style=\"rounded,filled\", color=\"#d0d0d0\", "
          "fillcolor=\"{fill}\", fontname=\"{font}\", fontsize={fs}];").format(
             shape=node_shape, fill=default_color, font=fontname, fs=fontsize),
         f"  edge [fontname=\"{fontname}\", fontsize={max(8, fontsize-2)} , arrowhead=normal];",
     ]
+
 
     # -----------------------------
     # Main Nodes
