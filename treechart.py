@@ -252,7 +252,7 @@ if uploaded is None:
 
 # Read file
 if uploaded.name.lower().endswith((".xlsx", ".xls")):
-    df = pd.read_excel(uploaded)
+    df = pd.read_excel(uploaded, engine="openpyxl")
 else:
     df = pd.read_csv(uploaded)
 
