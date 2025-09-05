@@ -10,7 +10,10 @@ import streamlit.components.v1 as components
 # ------------------------------
 # Helpers
 # ------------------------------
-MIS_LABELLED_SET = {"mis-labelled", "mis-labeled", "misbranded", "mis-branded", "mis branded", "mis labelled", "mis labeled"}
+MIS_LABELLED_SET = {
+    "mis-labelled", "mis-labeled", "misbranded", "mis-branded",
+    "mis branded", "mis labelled", "mis labeled"
+}
 COMPLIANT_TOKEN = "compliant as per fssr"
 SUBSTANDARD_TOKEN = "sub-standard"
 UNSAFE_TOKEN = "unsafe"
@@ -18,6 +21,7 @@ PARAM_END_TOKEN = "compliance"
 
 
 def split_parameters(cell_value: str) -> list:
+    """Split cell into parameter names."""
     if cell_value is None:
         return []
     text = str(cell_value).strip()
@@ -42,9 +46,11 @@ def format_node_label(title: str, count: int | None = None, pct: float | None = 
     return title
 
 
-def build_variant_subtree(dfx: pd.DataFrame, variant_choice: str, parent_id: str, settings: dict, id_prefix="") -> tuple[list[str], dict]:
-    """Build DOT lines for one variant branch (Loose or Packed)."""
+def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settings: dict) -> tuple[str, dict]:
+    """Build DOT decision tree for a single commodity+variant."""
     cols = {
+        "commodity": "Commodity",
+        "variant2": "Variant 2",
         "overall_compliance": "Overall Compliance",
         "overall_quality": "Overall Quality Classification",
         "overall_safety": "Overall Safety Classification",
@@ -53,11 +59,13 @@ def build_variant_subtree(dfx: pd.DataFrame, variant_choice: str, parent_id: str
         "unsafe_cases": "Unsafe Cases",
     }
 
-    dfx = dfx[dfx["Variant 2"].fillna("(missing)") == variant_choice]
+    dfx = df[df[cols["commodity"]] == commodity].copy()
+    dfx = dfx[dfx[cols["variant2"]].fillna("(missing)") == variant_choice]
     n_total = len(dfx)
     if n_total == 0:
-        return [], {}
+        raise ValueError(f"No rows for {commodity} / {variant_choice}")
 
+    # classifications
     comp_series = dfx[cols["overall_compliance"]].astype(str).str.strip().str.lower()
     n_compliant = (comp_series == COMPLIANT_TOKEN).sum()
     n_noncompliant = n_total - n_compliant
@@ -70,167 +78,178 @@ def build_variant_subtree(dfx: pd.DataFrame, variant_choice: str, parent_id: str
     n_safety_unsafe = (saf_series == UNSAFE_TOKEN).sum()
     n_lab_mis = lab_series.apply(lambda s: any(x in s for x in MIS_LABELLED_SET)).sum()
 
-    qual_params, saf_params = [], []
+    # parameters
+    qual_params = []
     if n_quality_sub:
         for _, row in dfx[qual_series == SUBSTANDARD_TOKEN].iterrows():
             qual_params.extend(split_parameters(row.get(cols["substandard_cases"])))
+    saf_params = []
     if n_safety_unsafe:
         for _, row in dfx[saf_series == UNSAFE_TOKEN].iterrows():
             saf_params.extend(split_parameters(row.get(cols["unsafe_cases"])))
-
-    qual_param_counts = Counter([p for p in qual_params if p.strip()])
-    saf_param_counts = Counter([p for p in saf_params if p.strip()])
+    qual_param_counts = Counter([p.strip() for p in qual_params if p.strip()])
+    saf_param_counts = Counter([p.strip() for p in saf_params if p.strip()])
 
     def pct(n: int) -> float:
         return (n / n_total * 100.0) if n_total else 0.0
 
-    compliant_color = settings.get("compliant_color", "#d4edda")
-    noncompliant_color = settings.get("noncompliant_color", "#f8d7da")
-
-    dot_lines = []
-    variant_id = f"{id_prefix}_variant"
-    comp_id = f"{id_prefix}_comp"
-    noncomp_id = f"{id_prefix}_noncomp"
-    qual_id = f"{id_prefix}_qual"
-    saf_id = f"{id_prefix}_saf"
-    lab_id = f"{id_prefix}_lab"
-
-    variant_label = format_node_label(f"{variant_choice}", n_total, 100.0)
-    comp_label = format_node_label("Compliant", n_compliant, pct(n_compliant))
-    noncomp_label = format_node_label("Non-Compliant", n_noncompliant, pct(n_noncompliant))
-
-    dot_lines += [
-        f'  {variant_id} [label="{variant_label}"];',
-        f'  {comp_id} [label="{comp_label}", fillcolor="{compliant_color}"];',
-        f'  {noncomp_id} [label="{noncomp_label}", fillcolor="{noncompliant_color}"];',
-        f'  {qual_id} [label="{format_node_label("Quality Parameters", n_quality_sub, pct(n_quality_sub))}"];',
-        f'  {saf_id} [label="{format_node_label("Safety Parameters", n_safety_unsafe, pct(n_safety_unsafe))}"];',
-        f'  {lab_id} [label="{format_node_label("Labelling Parameters", n_lab_mis, pct(n_lab_mis))}"];',
-        f"  {parent_id} -> {variant_id};",
-        f"  {variant_id} -> {comp_id};",
-        f"  {variant_id} -> {noncomp_id};",
-        f"  {noncomp_id} -> {qual_id};",
-        f"  {noncomp_id} -> {saf_id};",
-        f"  {noncomp_id} -> {lab_id};",
-    ]
-
-    for i, (pname, cnt) in enumerate(qual_param_counts.items()):
-        nid = f"{id_prefix}_q{i}"
-        dot_lines.append(f'  {nid} [label="{format_node_label(pname, cnt)}"];')
-        dot_lines.append(f"  {qual_id} -> {nid};")
-
-    for i, (pname, cnt) in enumerate(saf_param_counts.items()):
-        nid = f"{id_prefix}_s{i}"
-        dot_lines.append(f'  {nid} [label="{format_node_label(pname, cnt)}"];')
-        dot_lines.append(f"  {saf_id} -> {nid};")
-
-    stats = {
-        "total": n_total,
-        "compliant": n_compliant,
-        "non_compliant": n_noncompliant,
-        "quality_substandard": n_quality_sub,
-        "safety_unsafe": n_safety_unsafe,
-        "labelling_mis": n_lab_mis,
-    }
-    return dot_lines, stats
-
-
-def build_tree_dot(df: pd.DataFrame, commodity: str, settings: dict) -> str:
-    """Build DOT for powder or whole (multi-branch)."""
-    dfx = df[df["Commodity"] == commodity]
-    if dfx.empty:
-        raise ValueError(f"No rows for {commodity}")
-    n_total = len(dfx)
-
-    rankdir = settings.get("rankdir", "TB")
-    fontname = settings.get("fontname", "Helvetica")
-    fontsize = settings.get("fontsize", 12)
-    node_shape = settings.get("node_shape", "box")
-    nodesep = settings.get("nodesep", 0.5)
-    ranksep = settings.get("ranksep", 0.6)
-    default_color = settings.get("default_color", "#ffffff")
+    # styles
+    rankdir = settings["rankdir"]
+    fontname = settings["fontname"]
+    fontsize = settings["fontsize"]
+    node_shape = settings["node_shape"]
+    nodesep = settings["nodesep"]
+    ranksep = settings["ranksep"]
+    default_color = settings["default_color"]
+    compliant_color = settings["compliant_color"]
+    noncompliant_color = settings["noncompliant_color"]
 
     dot_lines = [
         "digraph G {",
         f"  rankdir={rankdir};",
         f"  graph [splines=ortho, nodesep={nodesep}, ranksep={ranksep}];",
-        f'  node [shape={node_shape}, style="rounded,filled", fontname="{fontname}", fontsize={fontsize}, fillcolor="{default_color}"];',
-        f'  edge [fontname="{fontname}", fontsize={fontsize-2}];',
+        ("  node [shape={shape}, style=\"rounded,filled\", color=\"#d0d0d0\", "
+         "fillcolor=\"{fill}\", fontname=\"{font}\", fontsize={fs}];").format(
+            shape=node_shape, fill=default_color, font=fontname, fs=fontsize),
+        f"  edge [fontname=\"{fontname}\", fontsize={max(8, fontsize-2)} , arrowhead=normal];",
     ]
 
-    root_id = "root"
-    dot_lines.append(f'  {root_id} [label="{format_node_label(commodity, n_total, 100.0)}"];')
+    # main nodes
+    root_label = format_node_label(f"{commodity} - {variant_choice}", n_total, 100.0)
+    comp_label = format_node_label("Compliant", n_compliant, pct(n_compliant))
+    noncomp_label = format_node_label("Non-Compliant", n_noncompliant, pct(n_noncompliant))
+    dot_lines.append(f'  root [label="{root_label}"];')
+    dot_lines.append(f'  comp [label="{comp_label}", fillcolor="{compliant_color}"];')
+    dot_lines.append(f'  noncomp [label="{noncomp_label}", fillcolor="{noncompliant_color}"];')
+    dot_lines.append("  root -> comp; root -> noncomp;")
 
-    variants = dfx["Variant 2"].fillna("(missing)").unique().tolist()
-    if len(variants) == 1:
-        # Powder case
-        v = variants[0]
-        subtree, _ = build_variant_subtree(dfx, v, root_id, settings, id_prefix="p")
-        dot_lines += subtree
-    else:
-        # Whole case: multiple variants (Loose & Packed)
-        for idx, v in enumerate(variants):
-            subtree, _ = build_variant_subtree(dfx, v, root_id, settings, id_prefix=f"v{idx}")
-            dot_lines += subtree
+    # quality/safety/lab
+    dot_lines.append(f'  qual [label="{format_node_label("Quality Parameters", n_quality_sub, pct(n_quality_sub))}"];')
+    dot_lines.append(f'  saf [label="{format_node_label("Safety Parameters", n_safety_unsafe, pct(n_safety_unsafe))}"];')
+    dot_lines.append(f'  lab [label="{format_node_label("Labelling Parameters", n_lab_mis, pct(n_lab_mis))}"];')
+    dot_lines.append("  noncomp -> qual; noncomp -> saf; noncomp -> lab;")
+
+    # leaf params
+    for i, (pname, cnt) in enumerate(sorted(qual_param_counts.items(), key=lambda x: -x[1])):
+        dot_lines.append(f'  q{i} [label="{format_node_label(pname, cnt)}"];')
+        dot_lines.append(f"  qual -> q{i};")
+    for i, (pname, cnt) in enumerate(sorted(saf_param_counts.items(), key=lambda x: -x[1])):
+        dot_lines.append(f'  s{i} [label="{format_node_label(pname, cnt)}"];')
+        dot_lines.append(f"  saf -> s{i};")
 
     dot_lines.append("}")
-    return "\n".join(dot_lines)
+    return "\n".join(dot_lines), {"total": n_total}
+
+
+def build_summary_dot(df: pd.DataFrame, commodity: str, settings: dict) -> str:
+    """Summary chart for commodity showing Loose vs Packed split."""
+    cols = {"commodity": "Commodity", "variant2": "Variant 2"}
+    dfx = df[df[cols["commodity"]] == commodity]
+    total = len(dfx)
+    variants = dfx[cols["variant2"]].fillna("(missing)").value_counts().to_dict()
+
+    rankdir = settings["rankdir"]
+    fontname = settings["fontname"]
+    fontsize = settings["fontsize"]
+    node_shape = settings["node_shape"]
+    nodesep = settings["nodesep"]
+    ranksep = settings["ranksep"]
+    default_color = settings["default_color"]
+
+    dot = [
+        "digraph G {",
+        f"  rankdir={rankdir};",
+        f"  graph [splines=ortho, nodesep={nodesep}, ranksep={ranksep}];",
+        f'  node [shape={node_shape}, style="rounded,filled", fillcolor="{default_color}", fontname="{fontname}", fontsize={fontsize}];'
+    ]
+    root = format_node_label(commodity, total, 100)
+    dot.append(f'  root [label="{root}"];')
+    for i, (v, cnt) in enumerate(variants.items()):
+        dot.append(f'  v{i} [label="{format_node_label(v, cnt, cnt/total*100)}"];')
+        dot.append(f"  root -> v{i};")
+    dot.append("}")
+    return "\n".join(dot)
+
+
+def render_viz(dot_src: str, height: int, filename_prefix: str):
+    """Render Graphviz via Viz.js in iframe with SVG/PNG download."""
+    viz_html = f"""
+    <html><body>
+      <div id="viz">Rendering...</div>
+      <a id="download-svg" download="{filename_prefix}.svg">⬇️ SVG</a>
+      <a id="download-png" download="{filename_prefix}.png">⬇️ PNG</a>
+      <script src="https://unpkg.com/viz.js@2.1.2/viz.js"></script>
+      <script src="https://unpkg.com/viz.js@2.1.2/full.render.js"></script>
+      <script>
+        const dot = {json.dumps(dot_src)};
+        const viz = new Viz();
+        viz.renderSVGElement(dot).then(el => {{
+          document.getElementById("viz").innerHTML = "";
+          document.getElementById("viz").appendChild(el);
+          const svgString = new XMLSerializer().serializeToString(el);
+          const svgBlob = new Blob([svgString], {{type: "image/svg+xml"}});
+          const svgUrl = URL.createObjectURL(svgBlob);
+          document.getElementById("download-svg").href = svgUrl;
+          const img = new Image();
+          img.onload = function() {{
+            const c = document.createElement("canvas");
+            c.width = img.width*2; c.height = img.height*2;
+            const ctx = c.getContext("2d");
+            ctx.fillStyle = "#fff"; ctx.fillRect(0,0,c.width,c.height);
+            ctx.drawImage(img,0,0,c.width,c.height);
+            document.getElementById("download-png").href = c.toDataURL("image/png");
+          }};
+          img.src = "data:image/svg+xml;base64,"+btoa(unescape(encodeURIComponent(svgString)));
+        }});
+      </script>
+    </body></html>
+    """
+    components.html(viz_html, height=height, scrolling=True)
 
 
 # ------------------------------
-# Streamlit App
+# Streamlit UI
 # ------------------------------
 st.set_page_config(layout="wide")
-st.title("🌳 Decision Tree Chart Generator (Powder + Whole)")
+st.title("🌳 Decision Tree Chart Generator")
 
-uploaded = st.file_uploader("Upload dataset (Excel/CSV)", type=["xlsx", "csv"])
+uploaded = st.file_uploader("Upload Excel (with Commodity, Variant 2, ...)", type=["xlsx"])
 if not uploaded:
     st.stop()
-
-if uploaded.name.endswith(".csv"):
-    df = pd.read_csv(uploaded)
-else:
-    df = pd.read_excel(uploaded, engine="openpyxl")
-
-commodities = sorted(df["Commodity"].dropna().unique().tolist())
-commodity = st.selectbox("Select Commodity", commodities)
+df = pd.read_excel(uploaded)
 
 # Sidebar settings
 st.sidebar.header("⚙️ Chart Style")
+rankdir_choice = st.sidebar.radio("Orientation", ["TB", "LR"])
 settings = {
-    "rankdir": "TB" if st.sidebar.radio("Orientation", ["TB", "LR"], 0) == "TB" else "LR",
+    "rankdir": rankdir_choice,
     "fontname": st.sidebar.selectbox("Font", ["Helvetica", "Arial", "Times New Roman"]),
     "fontsize": st.sidebar.slider("Font size", 8, 20, 12),
-    "node_shape": st.sidebar.selectbox("Shape", ["box", "ellipse"]),
+    "node_shape": st.sidebar.selectbox("Node shape", ["box", "ellipse", "circle"]),
     "nodesep": st.sidebar.slider("Node spacing", 0.1, 2.0, 0.5),
     "ranksep": st.sidebar.slider("Rank separation", 0.1, 2.0, 0.6),
-    "default_color": st.sidebar.color_picker("Default node", "#ffffff"),
-    "compliant_color": st.sidebar.color_picker("Compliant node", "#d4edda"),
-    "noncompliant_color": st.sidebar.color_picker("Non-compliant node", "#f8d7da"),
+    "default_color": st.sidebar.color_picker("Default node color", "#ffffff"),
+    "compliant_color": st.sidebar.color_picker("Compliant color", "#d4edda"),
+    "noncompliant_color": st.sidebar.color_picker("Non-compliant color", "#f8d7da"),
 }
-preview_height = st.sidebar.slider("Preview height", 300, 1200, 700)
+preview_height = st.sidebar.slider("Preview height", 300, 1200, 600)
 
-# Build DOT
-dot_src = build_tree_dot(df, commodity, settings)
+# Select commodity
+commodities = df["Commodity"].dropna().unique().tolist()
+commodity = st.selectbox("Commodity", commodities)
 
-# Preview using Viz.js
-viz_html = f"""
-<html><body>
-<div id="viz"></div>
-<script src="https://unpkg.com/viz.js@2.1.2/viz.js"></script>
-<script src="https://unpkg.com/viz.js@2.1.2/full.render.js"></script>
-<script>
-var viz = new Viz();
-viz.renderSVGElement({json.dumps(dot_src)}).then(function(element) {{
-  document.getElementById("viz").appendChild(element);
-}});
-</script>
-</body></html>
-"""
-components.html(viz_html, height=preview_height, scrolling=True)
+# Check variants
+variants = df[df["Commodity"] == commodity]["Variant 2"].dropna().unique().tolist()
 
-st.download_button("⬇️ Download DOT", dot_src, file_name=f"{commodity}.dot", mime="text/plain")
+if len(variants) > 1:
+    st.subheader(f"📊 Summary Chart for {commodity}")
+    summary_dot = build_summary_dot(df, commodity, settings)
+    render_viz(summary_dot, preview_height, f"{commodity}_summary")
 
+for v in variants:
+    st.subheader(f"📊 Detailed Chart: {commodity} - {v}")
+    dot_src, stats = build_tree_dot(df, commodity, v, settings)
+    render_viz(dot_src, preview_height, f"{commodity}_{v}")
 
 
 
