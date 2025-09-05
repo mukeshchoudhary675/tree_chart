@@ -1,13 +1,10 @@
 import io
 import re
+import base64
 import pandas as pd
 import streamlit as st
+from PIL import Image
 from graphviz import Digraph
-
-try:
-    import graphviz
-except Exception as e:
-    graphviz = None
 
 # ------------------------------
 # Helpers
@@ -31,40 +28,27 @@ PARAM_END_TOKEN = "compliance"
 def split_parameters(cell_value: str) -> list:
     if pd.isna(cell_value) or str(cell_value).strip() == "":
         return []
-    text = str(cell_value)
 
+    text = str(cell_value)
     if PARAM_END_TOKEN.lower() in text.lower():
         pieces = re.split(r"(?i)\bcompliance\b", text)
-        params = []
-        for p in pieces:
-            p = p.strip().strip(",;")
-            if p:
-                params.append(p)
-        return params
-
+        return [p.strip(",; ") for p in pieces if p.strip(",; ")]
     parts = re.split(r"[\n\r;|]", text)
-    out = [p.strip().strip(",") for p in parts if p.strip()]
-    if out:
-        return out
-
-    return [p.strip() for p in re.split(r",\s{2,}|,", text) if p.strip()]
+    out = [p.strip(", ") for p in parts if p.strip()]
+    return out or [p.strip() for p in re.split(r",\s{2,}|,", text) if p.strip()]
 
 
 def format_node_label(title: str, count: int | None = None, pct: float | None = None) -> str:
     line1 = title
     if count is not None and pct is not None:
-        line2 = f"[{count} Samples; {pct:.1f}%]"
+        return f"{line1}\n[{count} Samples; {pct:.1f}%]"
     elif count is not None:
         unit = "Sample" if count == 1 else "Samples"
-        line2 = f"[{count} {unit}]"
-    else:
-        line2 = None
-    return f"{line1}\n{line2}" if line2 else line1
+        return f"{line1}\n[{count} {unit}]"
+    return line1
 
 
-def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str | None = None,
-                   settings: dict | None = None) -> tuple[str, dict]:
-
+def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str | None = None) -> tuple[str, dict]:
     cols = {
         "commodity": "Commodity",
         "variant2": "Variant 2",
@@ -86,8 +70,6 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str | None 
 
     dfx = dfx[dfx[cols["variant2"]].fillna("(missing)") == variant_choice]
     n_total = len(dfx)
-    if n_total == 0:
-        raise ValueError("No rows after filtering Variant 2 == '" + str(variant_choice) + "'")
 
     comp_series = dfx[cols["overall_compliance"]].astype(str).str.strip().str.lower()
     n_compliant = (comp_series == COMPLIANT_TOKEN).sum()
@@ -102,62 +84,39 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str | None 
     n_lab_mis = lab_series.apply(lambda s: any(x in s for x in MIS_LABELLED_SET)).sum()
 
     from collections import Counter
-    qual_params = []
+    qual_params, saf_params = [], []
     if n_quality_sub:
         for _, row in dfx[qual_series == SUBSTANDARD_TOKEN].iterrows():
             qual_params.extend(split_parameters(row.get(cols["substandard_cases"])))
-    qual_param_counts = Counter([p.strip() for p in qual_params if p])
-
-    saf_params = []
     if n_safety_unsafe:
         for _, row in dfx[saf_series == UNSAFE_TOKEN].iterrows():
             saf_params.extend(split_parameters(row.get(cols["unsafe_cases"])))
+    qual_param_counts = Counter([p.strip() for p in qual_params if p])
     saf_param_counts = Counter([p.strip() for p in saf_params if p])
 
     def pct(n: int) -> float:
         return (n / n_total * 100.0) if n_total else 0.0
 
-    # === Chart style settings ===
-    rankdir = settings.get("rankdir", "TB")
-    fontname = settings.get("fontname", "Helvetica")
-    fontsize = settings.get("fontsize", 12)
-    node_shape = settings.get("node_shape", "box")
-    nodesep = settings.get("nodesep", 0.5)
-    ranksep = settings.get("ranksep", 0.6)
-    compliant_color = settings.get("compliant_color", "#d4edda")
-    noncompliant_color = settings.get("noncompliant_color", "#f8d7da")
-    default_color = settings.get("default_color", "white")
-
     dot = [
         "digraph G {",
-        f"  rankdir={rankdir};",
-        f"  graph [splines=ortho, nodesep={nodesep}, ranksep={ranksep}];",
-        f"  node [shape={node_shape}, style=\"rounded,filled\", color=\"#d0d0d0\", fillcolor={default_color}, fontname=\"{fontname}\", fontsize={fontsize}];",
+        "  rankdir=TB;",
+        "  graph [splines=ortho, nodesep=0.5, ranksep=0.6];",
+        "  node [shape=box, style=\"rounded,filled\", color=\"#d0d0d0\", fillcolor=white, fontname=Helvetica];",
         "  edge [arrowhead=normal];",
     ]
 
-    root_id = "root"
-    variant_id = "variant"
-    comp_id = "comp"
-    noncomp_id = "noncomp"
-    qual_id = "qual"
-    saf_id = "saf"
-    lab_id = "lab"
-
+    root_id, variant_id, comp_id, noncomp_id, qual_id, saf_id, lab_id = "root","variant","comp","noncomp","qual","saf","lab"
     root_label = format_node_label(f"{commodity}", n_total, 100.0)
     variant_label = format_node_label(f"{variant_choice}", n_total, 100.0)
-    comp_label = format_node_label("Compliant", n_compliant, pct(n_compliant))
-    noncomp_label = format_node_label("Non-Compliant", n_noncompliant, pct(n_noncompliant))
-
-    dot.append(f'  {root_id} [label="{root_label}"];')
-    dot.append(f'  {variant_id} [label="{variant_label}"];')
-    dot.append(f'  {comp_id} [label="{comp_label}", fillcolor="{compliant_color}"];')
-    dot.append(f'  {noncomp_id} [label="{noncomp_label}", fillcolor="{noncompliant_color}"];')
-    dot.append(f'  {qual_id} [label="{format_node_label("Quality Parameters\\nNon-Compliance", n_quality_sub, pct(n_quality_sub))}"];')
-    dot.append(f'  {saf_id} [label="{format_node_label("Safety Parameters\\nNon-Compliance", n_safety_unsafe, pct(n_safety_unsafe))}"];')
-    dot.append(f'  {lab_id} [label="{format_node_label("Labelling Attributes\\nNon-Compliance", n_lab_mis, pct(n_lab_mis))}"];')
 
     dot += [
+        f'  {root_id} [label="{root_label}"];',
+        f'  {variant_id} [label="{variant_label}"];',
+        f'  {comp_id} [label="{format_node_label("Compliant", n_compliant, pct(n_compliant))}", fillcolor="#d4edda"];',
+        f'  {noncomp_id} [label="{format_node_label("Non-Compliant", n_noncompliant, pct(n_noncompliant))}", fillcolor="#f8d7da"];',
+        f'  {qual_id} [label="{format_node_label("Quality Parameters\\nNon-Compliance", n_quality_sub, pct(n_quality_sub))}"];',
+        f'  {saf_id} [label="{format_node_label("Safety Parameters\\nNon-Compliance", n_safety_unsafe, pct(n_safety_unsafe))}"];',
+        f'  {lab_id} [label="{format_node_label("Labelling Attributes\\nNon-Compliance", n_lab_mis, pct(n_lab_mis))}"];',
         f"  {root_id} -> {variant_id};",
         f"  {variant_id} -> {comp_id};",
         f"  {variant_id} -> {noncomp_id};",
@@ -166,22 +125,18 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str | None 
         f"  {noncomp_id} -> {lab_id};",
     ]
 
-    for i, (pname, cnt) in enumerate(sorted(qual_param_counts.items(), key=lambda x: (-x[1], x[0]))):
-        nid = f"q{i}"
-        label = format_node_label(pname, cnt)
-        dot.append(f'  {nid} [label="{label}"];')
+    for i,(p,cnt) in enumerate(qual_param_counts.items()):
+        nid=f"q{i}"
+        dot.append(f'  {nid} [label="{format_node_label(p,cnt)}"];')
         dot.append(f"  {qual_id} -> {nid};")
 
-    for i, (pname, cnt) in enumerate(sorted(saf_param_counts.items(), key=lambda x: (-x[1], x[0]))):
-        nid = f"s{i}"
-        label = format_node_label(pname, cnt)
-        dot.append(f'  {nid} [label="{label}"];')
+    for i,(p,cnt) in enumerate(saf_param_counts.items()):
+        nid=f"s{i}"
+        dot.append(f'  {nid} [label="{format_node_label(p,cnt)}"];')
         dot.append(f"  {saf_id} -> {nid};")
 
     dot.append("}")
-    dot_src = "\n".join(dot)
-
-    stats = {
+    return "\n".join(dot), {
         "total": n_total,
         "variant": variant_choice,
         "compliant": n_compliant,
@@ -189,10 +144,7 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str | None 
         "quality_substandard": n_quality_sub,
         "safety_unsafe": n_safety_unsafe,
         "labelling_mis": n_lab_mis,
-        "qual_param_counts": dict(qual_param_counts),
-        "saf_param_counts": dict(saf_param_counts),
     }
-    return dot_src, stats
 
 
 # ------------------------------
@@ -200,16 +152,16 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str | None 
 # ------------------------------
 
 st.set_page_config(page_title="Decision Tree Chart Generator", layout="wide")
-st.title("Decision Tree Chart Generator (Compliance • Quality • Safety • Labelling)")
-st.caption("Upload your Excel/CSV → choose commodity → auto-generate + customize the tree chart.")
+st.title("🌳 Decision Tree Chart Generator")
+st.caption("Upload Excel/CSV → Select commodity → Auto-generate compliance tree")
 
-uploaded = st.file_uploader("Upload dataset (Excel .xlsx or CSV)", type=["xlsx", "xls", "csv"], accept_multiple_files=False)
+uploaded = st.file_uploader("Upload dataset", type=["xlsx", "xls", "csv"])
 
 if uploaded is None:
     st.info("Upload your dataset to begin.")
     st.stop()
 
-if uploaded.name.lower().endswith((".xlsx", ".xls")):
+if uploaded.name.endswith((".xlsx", ".xls")):
     df = pd.read_excel(uploaded, engine="openpyxl")
 else:
     df = pd.read_csv(uploaded)
@@ -224,53 +176,42 @@ if missing:
     st.stop()
 
 commodities = sorted(df["Commodity"].dropna().unique().tolist())
-commodity = st.selectbox("Commodity", commodities, index=0)
-
+commodity = st.selectbox("Commodity", commodities)
 variants_all = df.loc[df["Commodity"] == commodity, "Variant 2"].fillna("(missing)").unique().tolist()
-variant_choice = st.selectbox("Variant 2 (path node)", variants_all, index=0)
+variant_choice = st.selectbox("Variant 2", variants_all)
 
-# Sidebar settings
-st.sidebar.header("⚙️ Chart Customization")
-rankdir = st.sidebar.radio("Chart Orientation", ["TB (Top→Bottom)", "LR (Left→Right)"])
-fontname = st.sidebar.selectbox("Font", ["Helvetica", "Arial", "Times New Roman", "Courier"])
-fontsize = st.sidebar.slider("Font Size", 8, 24, 12)
-node_shape = st.sidebar.selectbox("Node Shape", ["box", "ellipse", "oval", "circle"])
-nodesep = st.sidebar.slider("Node Spacing", 0.2, 2.0, 0.5)
-ranksep = st.sidebar.slider("Rank Separation", 0.2, 2.0, 0.6)
-default_color = st.sidebar.color_picker("Default Node Color", "#FFFFFF")
-compliant_color = st.sidebar.color_picker("Compliant Node Color", "#d4edda")
-noncompliant_color = st.sidebar.color_picker("Non-Compliant Node Color", "#f8d7da")
+try:
+    dot_src, stats = build_tree_dot(df, commodity, variant_choice)
+except Exception as e:
+    st.exception(e)
+    st.stop()
 
-settings = {
-    "rankdir": rankdir.split()[0],
-    "fontname": fontname,
-    "fontsize": fontsize,
-    "node_shape": node_shape,
-    "nodesep": nodesep,
-    "ranksep": ranksep,
-    "default_color": default_color,
-    "compliant_color": compliant_color,
-    "noncompliant_color": noncompliant_color,
-}
-
-dot_src, stats = build_tree_dot(df, commodity, variant_choice, settings)
-
-st.subheader("Decision Tree")
+# PREVIEW (always works)
+st.subheader("Decision Tree Preview")
 st.graphviz_chart(dot_src, use_container_width=True)
 
-st.download_button("⬇️ Download .dot source", data=dot_src.encode("utf-8"),
+# ------------------------------
+# DOWNLOADS
+# ------------------------------
+
+st.download_button("⬇️ Download .dot file", data=dot_src.encode("utf-8"),
                    file_name=f"{commodity}_decision_tree.dot", mime="text/vnd.graphviz")
 
-if graphviz is not None:
-    try:
-        g = Digraph(engine="dot")
-        g.source = dot_src
-        png_bytes = g.pipe(format="png")
-        st.download_button("⬇️ Download PNG", data=png_bytes,
-                           file_name=f"{commodity}_decision_tree.png", mime="image/png")
-    except Exception:
-        st.warning("⚠️ PNG export needs Graphviz system binaries (not available on Streamlit Cloud).")
+# Convert to SVG (base64)
+try:
+    g = Digraph()
+    g.source = dot_src
+    svg_bytes = g.pipe(format="svg")
+    st.download_button("⬇️ Download as SVG", data=svg_bytes,
+                       file_name=f"{commodity}_decision_tree.svg", mime="image/svg+xml")
 
+    # Convert SVG → PNG via Pillow
+    import cairosvg
+    png_bytes = cairosvg.svg2png(bytestring=svg_bytes)
+    st.download_button("⬇️ Download as PNG", data=png_bytes,
+                       file_name=f"{commodity}_decision_tree.png", mime="image/png")
+except Exception as e:
+    st.warning("SVG/PNG export may fail on Streamlit Cloud if Graphviz is not fully installed.")
 
 
 
