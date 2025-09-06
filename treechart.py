@@ -1,8 +1,7 @@
 # app.py
 import re
 import json
-from collections import Counter
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import pandas as pd
 import streamlit as st
@@ -22,7 +21,6 @@ PARAM_END_TOKEN = "compliance"
 
 
 def split_parameters(cell_value: str) -> list:
-    """Split cell into parameter names."""
     if cell_value is None:
         return []
     text = str(cell_value).strip()
@@ -47,8 +45,8 @@ def format_node_label(title: str, count: int | None = None, pct: float | None = 
     return title
 
 
-def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settings: dict) -> tuple[str, dict]:
-    """Build DOT decision tree for a single commodity+variant with grouping by Test Type."""
+def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settings: dict) -> tuple[str, dict, pd.DataFrame]:
+    """Build DOT decision tree and also return flat dataset for CSV export."""
     cols = {
         "commodity": "Commodity",
         "variant2": "Variant 2",
@@ -67,7 +65,6 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settin
     if n_total == 0:
         raise ValueError(f"No rows for {commodity} / {variant_choice}")
 
-    # classifications
     comp_series = dfx[cols["overall_compliance"]].astype(str).str.strip().str.lower()
     n_compliant = (comp_series == COMPLIANT_TOKEN).sum()
     n_noncompliant = n_total - n_compliant
@@ -80,9 +77,6 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settin
     n_safety_unsafe = (saf_series == UNSAFE_TOKEN).sum()
     n_lab_mis = lab_series.apply(lambda s: any(x in s for x in MIS_LABELLED_SET)).sum()
 
-    # -----------------------------
-    # Parameters grouped by Test Type
-    # -----------------------------
     qual_grouped = defaultdict(list)
     if n_quality_sub:
         for _, row in dfx[qual_series == SUBSTANDARD_TOKEN].iterrows():
@@ -103,114 +97,72 @@ def build_tree_dot(df: pd.DataFrame, commodity: str, variant_choice: str, settin
         return (n / n_total * 100.0) if n_total else 0.0
 
     # -----------------------------
-    # Styles
+    # DOT
     # -----------------------------
-    rankdir = settings["rankdir"]
-    fontname = settings["fontname"]
-    fontsize = settings["fontsize"]
-    node_shape = settings["node_shape"]
-    nodesep = settings["nodesep"]
-    ranksep = settings["ranksep"]
-    default_color = settings["default_color"]
-    compliant_color = settings["compliant_color"]
-    noncompliant_color = settings["noncompliant_color"]
-
     dot_lines = [
         "digraph G {",
-        "  rankdir=TB;",   # force top-to-bottom flow
-        f"  graph [splines=ortho, nodesep={nodesep}, ranksep={ranksep}];",
+        "  rankdir=TB;",
+        f"  graph [splines=ortho, nodesep={settings['nodesep']}, ranksep={settings['ranksep']}];",
         ("  node [shape={shape}, style=\"rounded,filled\", color=\"#d0d0d0\", "
          "fillcolor=\"{fill}\", fontname=\"{font}\", fontsize={fs}];").format(
-            shape=node_shape, fill=default_color, font=fontname, fs=fontsize),
-        f"  edge [fontname=\"{fontname}\", fontsize={max(8, fontsize-2)} , arrowhead=normal];",
+            shape=settings["node_shape"], fill=settings["default_color"], font=settings["fontname"], fs=settings["fontsize"]),
+        f"  edge [fontname=\"{settings['fontname']}\", fontsize={max(8, settings['fontsize']-2)} , arrowhead=normal];",
     ]
 
-    # -----------------------------
-    # Main Nodes
-    # -----------------------------
+    records = []  # collect CSV rows
+
     root_label = format_node_label(f"{commodity} - {variant_choice}", n_total, 100.0)
     comp_label = format_node_label("Compliant", n_compliant, pct(n_compliant))
     noncomp_label = format_node_label("Non-Compliant", n_noncompliant, pct(n_noncompliant))
 
     dot_lines.append(f'  root [label="{root_label}"];')
-    dot_lines.append(f'  comp [label="{comp_label}", fillcolor="{compliant_color}"];')
-    dot_lines.append(f'  noncomp [label="{noncomp_label}", fillcolor="{noncompliant_color}"];')
+    dot_lines.append(f'  comp [label="{comp_label}", fillcolor="{settings["compliant_color"]}"];')
+    dot_lines.append(f'  noncomp [label="{noncomp_label}", fillcolor="{settings["noncompliant_color"]}"];')
     dot_lines.append("  root -> comp; root -> noncomp;")
 
-    # Quality / Safety / Lab
     dot_lines.append(f'  qual [label="{format_node_label("Quality Parameters", n_quality_sub, pct(n_quality_sub))}"];')
     dot_lines.append(f'  saf [label="{format_node_label("Safety Parameters", n_safety_unsafe, pct(n_safety_unsafe))}"];')
     dot_lines.append(f'  lab [label="{format_node_label("Labelling Parameters", n_lab_mis, pct(n_lab_mis))}"];')
     dot_lines.append("  noncomp -> qual; noncomp -> saf; noncomp -> lab;")
 
-    # -----------------------------
-    # Quality Branch with vertical stacking
-    # -----------------------------
+    # Quality
     for j, (ttype, plist) in enumerate(qual_grouped.items()):
         type_id = f"qtype{j}"
         dot_lines.append(f'  {type_id} [label="{format_node_label(ttype, len(plist))}"];')
         dot_lines.append(f"  qual -> {type_id};")
+        for pname, cnt in Counter(plist).items():
+            pid = f"{type_id}_{abs(hash(pname))%9999}"
+            dot_lines.append(f'  {pid} [label="{format_node_label(pname, cnt)}"];')
+            dot_lines.append(f"  {type_id} -> {pid};")
+            records.append([commodity, variant_choice, "Quality", ttype, pname, cnt])
 
-        leaves = sorted(set(plist))
-        if leaves:
-            dot_lines.append(f"  subgraph cluster_{type_id} {{")
-            dot_lines.append("    rankdir=TB; style=invis;")
-            prev = None
-            for i, pname in enumerate(leaves):
-                pid = f"{type_id}_{i}"
-                dot_lines.append(f'    {pid} [label="{format_node_label(pname, plist.count(pname))}"];')
-                if prev:
-                    dot_lines.append(f"    {prev} -> {pid} [style=invis];")
-                prev = pid
-            dot_lines.append("  }")
-            dot_lines.append(f"  {type_id} -> {type_id}_0;")
-
-    # -----------------------------
-    # Safety Branch with vertical stacking
-    # -----------------------------
+    # Safety
     for j, (ttype, plist) in enumerate(saf_grouped.items()):
         type_id = f"stype{j}"
         dot_lines.append(f'  {type_id} [label="{format_node_label(ttype, len(plist))}"];')
         dot_lines.append(f"  saf -> {type_id};")
-
-        leaves = sorted(set(plist))
-        if leaves:
-            dot_lines.append(f"  subgraph cluster_{type_id} {{")
-            dot_lines.append("    rankdir=TB; style=invis;")
-            prev = None
-            for i, pname in enumerate(leaves):
-                pid = f"{type_id}_{i}"
-                dot_lines.append(f'    {pid} [label="{format_node_label(pname, plist.count(pname))}"];')
-                if prev:
-                    dot_lines.append(f"    {prev} -> {pid} [style=invis];")
-                prev = pid
-            dot_lines.append("  }")
-            dot_lines.append(f"  {type_id} -> {type_id}_0;")
+        for pname, cnt in Counter(plist).items():
+            pid = f"{type_id}_{abs(hash(pname))%9999}"
+            dot_lines.append(f'  {pid} [label="{format_node_label(pname, cnt)}"];')
+            dot_lines.append(f"  {type_id} -> {pid};")
+            records.append([commodity, variant_choice, "Safety", ttype, pname, cnt])
 
     dot_lines.append("}")
-    return "\n".join(dot_lines), {"total": n_total}
+    df_csv = pd.DataFrame(records, columns=["Commodity", "Variant", "Branch", "Test Type", "Parameter", "Count"])
+    return "\n".join(dot_lines), {"total": n_total}, df_csv
 
 
 def build_summary_dot(df: pd.DataFrame, commodity: str, settings: dict) -> str:
-    """Summary chart for commodity showing Loose vs Packed split."""
     cols = {"commodity": "Commodity", "variant2": "Variant 2"}
     dfx = df[df[cols["commodity"]] == commodity]
     total = len(dfx)
     variants = dfx[cols["variant2"]].fillna("(missing)").value_counts().to_dict()
 
-    rankdir = settings["rankdir"]
-    fontname = settings["fontname"]
-    fontsize = settings["fontsize"]
-    node_shape = settings["node_shape"]
-    nodesep = settings["nodesep"]
-    ranksep = settings["ranksep"]
-    default_color = settings["default_color"]
-
     dot = [
         "digraph G {",
-        f"  rankdir={rankdir};",
-        f"  graph [splines=ortho, nodesep={nodesep}, ranksep={ranksep}];",
-        f'  node [shape={node_shape}, style="rounded,filled", fillcolor="{default_color}", fontname="{fontname}", fontsize={fontsize}];'
+        f"  rankdir={settings['rankdir']};",
+        f"  graph [splines=ortho, nodesep={settings['nodesep']}, ranksep={settings['ranksep']}];",
+        f'  node [shape={settings["node_shape"]}, style="rounded,filled", fillcolor="{settings["default_color"]}", fontname="{settings["fontname"]}", fontsize={settings["fontsize"]}];'
     ]
     root = format_node_label(commodity, total, 100)
     dot.append(f'  root [label="{root}"];')
@@ -222,7 +174,6 @@ def build_summary_dot(df: pd.DataFrame, commodity: str, settings: dict) -> str:
 
 
 def render_viz(dot_src: str, height: int, filename_prefix: str):
-    """Render Graphviz via Viz.js in iframe with SVG/PNG download."""
     viz_html = f"""
     <html><body>
       <div id="viz">Rendering...</div>
@@ -268,7 +219,7 @@ if not uploaded:
     st.stop()
 df = pd.read_excel(uploaded)
 
-# Sidebar settings
+# Sidebar
 st.sidebar.header("⚙️ Chart Style")
 rankdir_choice = st.sidebar.radio("Orientation", ["TB", "LR"])
 settings = {
@@ -284,11 +235,9 @@ settings = {
 }
 preview_height = st.sidebar.slider("Preview height", 300, 1200, 600)
 
-# Select commodity
 commodities = df["Commodity"].dropna().unique().tolist()
 commodity = st.selectbox("Commodity", commodities)
 
-# Check variants
 variants = df[df["Commodity"] == commodity]["Variant 2"].dropna().unique().tolist()
 
 if len(variants) > 1:
@@ -298,8 +247,15 @@ if len(variants) > 1:
 
 for v in variants:
     st.subheader(f"📊 Detailed Chart: {commodity} - {v}")
-    dot_src, stats = build_tree_dot(df, commodity, v, settings)
+    dot_src, stats, df_csv = build_tree_dot(df, commodity, v, settings)
     render_viz(dot_src, preview_height, f"{commodity}_{v}")
+
+    st.download_button(
+        label=f"⬇️ Download CSV for {commodity} - {v}",
+        data=df_csv.to_csv(index=False).encode("utf-8"),
+        file_name=f"{commodity}_{v}_tree.csv",
+        mime="text/csv",
+    )
 
 
 
